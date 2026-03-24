@@ -4,105 +4,137 @@ import {
   Text,
   FlatList,
   StyleSheet,
-  ScrollView,
-  RefreshControl,
   TouchableOpacity,
+  RefreshControl,
+  ListRenderItemInfo,
 } from 'react-native';
 import {useSafeAreaInsets} from 'react-native-safe-area-context';
 import {TaskContext} from '../context/TaskContext';
 import {ThemeContext} from '../context/ThemeContext';
+import {ActivityLog} from '../Types/Task';
 import OfflineIndicator from '../Component/OfflineIndicator';
 
 export default function ActivityLogScreen() {
-  const {logs, clearLogs} = useContext(TaskContext);
+  const context = useContext(TaskContext);
   const {darkMode} = useContext(ThemeContext);
   const insets = useSafeAreaInsets();
   const [refreshing, setRefreshing] = useState(false);
 
+  if (!context) return null;
+  const {logs, clearLogs} = context;
+
+  const styles = getStyles(darkMode, insets);
+
   const onRefresh = async () => {
     setRefreshing(true);
-    // Simulate refresh delay
-    setTimeout(() => {
-      setRefreshing(false);
-    }, 1000);
+    setTimeout(() => setRefreshing(false), 800);
   };
 
-  const handleClearLogs = () => {
-    clearLogs();
-  };
+  // ── Render helpers ─────────────────────────────────────────────────────
 
-  const renderEmptyState = () => {
-    const styles = getStyles(darkMode, insets);
-    return (
-      <View style={styles.emptyState}>
-        <Text style={styles.emptyIcon}>📝</Text>
-        <Text style={styles.emptyTitle}>No activity yet</Text>
-        <Text style={styles.emptySubtitle}>
-          Your task activities will appear here once you start creating,
-          updating, or completing tasks.
-        </Text>
-      </View>
-    );
-  };
+  const renderEmpty = () => (
+    <View style={styles.emptyState}>
+      <Text style={styles.emptyIcon}>📋</Text>
+      <Text style={styles.emptyTitle}>No activity yet</Text>
+      <Text style={styles.emptySubtitle}>
+        Your task activities will appear here once you start creating, updating,
+        or completing tasks.
+      </Text>
+    </View>
+  );
 
-  const renderLogItem = ({item, index}: {item: string; index: number}) => {
-    const styles = getStyles(darkMode, insets);
+  /**
+   * Fixed: the original used `new Date().toLocaleTimeString()` at render
+   * time, so every item showed the current time instead of when the log
+   * was actually created. Now we read `item.timestamp` which is stored
+   * as an ISO string when the log is created.
+   */
+  const renderItem = ({item, index}: ListRenderItemInfo<ActivityLog>) => {
     const isEven = index % 2 === 0;
+    const date = new Date(item.timestamp);
+
+    const timeLabel = date.toLocaleTimeString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+
+    const dateLabel = isToday(date)
+      ? 'Today'
+      : date.toLocaleDateString(undefined, {
+          day: 'numeric',
+          month: 'short',
+        });
 
     return (
       <View style={[styles.logItem, isEven && styles.logItemEven]}>
         <View style={styles.logContent}>
-          <Text style={styles.logText}>{item}</Text>
+          <Text style={styles.logText}>{item.message}</Text>
         </View>
-        <View style={styles.logTime}>
-          <Text style={styles.timeText}>{new Date().toLocaleTimeString()}</Text>
+        <View style={styles.logMeta}>
+          <Text style={styles.timeText}>{timeLabel}</Text>
+          <Text style={styles.dateText}>{dateLabel}</Text>
         </View>
       </View>
     );
   };
 
-  const styles = getStyles(darkMode, insets);
-
   return (
     <View style={styles.container}>
       <OfflineIndicator />
+
       <View style={styles.header}>
-        <Text style={styles.screenTitle}>Activity Log</Text>
-        <Text style={styles.subtitle}>
-          {logs.length} {logs.length === 1 ? 'activity' : 'activities'}
-        </Text>
+        <View>
+          <Text style={styles.screenTitle}>Activity Log</Text>
+          <Text style={styles.subtitle}>
+            {logs.length} {logs.length === 1 ? 'activity' : 'activities'}
+          </Text>
+        </View>
         {logs.length > 0 && (
-          <TouchableOpacity
-            style={styles.clearButton}
-            onPress={handleClearLogs}>
+          <TouchableOpacity style={styles.clearButton} onPress={clearLogs}>
             <Text style={styles.clearButtonText}>Clear All</Text>
           </TouchableOpacity>
         )}
       </View>
 
-      {logs.length === 0 ? (
-        renderEmptyState()
-      ) : (
-        <FlatList
-          data={[...logs].reverse()}
-          keyExtractor={(item, index) => index.toString()}
-          renderItem={renderLogItem}
-          showsVerticalScrollIndicator={false}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor={darkMode ? '#fff' : '#000'}
-            />
-          }
-          contentContainerStyle={styles.listContainer}
-        />
-      )}
+      <FlatList<ActivityLog>
+        data={[...logs].reverse()}
+        keyExtractor={item => item.id}
+        renderItem={renderItem}
+        ListEmptyComponent={renderEmpty}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={darkMode ? '#fff' : '#000'}
+          />
+        }
+        contentContainerStyle={[
+          styles.listContainer,
+          logs.length === 0 && styles.listContainerEmpty,
+        ]}
+      />
     </View>
   );
 }
 
-const getStyles = (darkMode: boolean, insets: any) =>
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function isToday(date: Date): boolean {
+  const today = new Date();
+  return (
+    date.getDate() === today.getDate() &&
+    date.getMonth() === today.getMonth() &&
+    date.getFullYear() === today.getFullYear()
+  );
+}
+
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
+const getStyles = (
+  darkMode: boolean,
+  insets: ReturnType<typeof useSafeAreaInsets>,
+) =>
   StyleSheet.create({
     container: {
       flex: 1,
@@ -110,89 +142,97 @@ const getStyles = (darkMode: boolean, insets: any) =>
       paddingTop: insets.top,
     },
     header: {
-      padding: 20,
-      paddingBottom: 10,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: 20,
+      paddingVertical: 16,
     },
     screenTitle: {
       fontSize: 28,
       fontWeight: 'bold',
       color: darkMode ? '#ffffff' : '#2c3e50',
-      marginBottom: 5,
+      marginBottom: 2,
     },
     subtitle: {
-      fontSize: 16,
-      color: darkMode ? '#999' : '#666',
-      marginBottom: 15,
+      fontSize: 14,
+      color: darkMode ? '#888' : '#888',
     },
     clearButton: {
-      backgroundColor: '#ff4444',
-      paddingHorizontal: 20,
-      paddingVertical: 10,
+      backgroundColor: '#e74c3c',
+      paddingHorizontal: 16,
+      paddingVertical: 8,
       borderRadius: 8,
-      alignSelf: 'flex-start',
     },
     clearButtonText: {
       color: '#fff',
-      fontSize: 14,
-      fontWeight: 'bold',
+      fontSize: 13,
+      fontWeight: '700',
     },
     listContainer: {
-      paddingHorizontal: 20,
-      paddingBottom: insets.bottom + 20,
+      paddingHorizontal: 16,
+      paddingBottom: insets.bottom + 24,
+    },
+    listContainerEmpty: {
+      flex: 1,
     },
     logItem: {
-      backgroundColor: darkMode ? '#2a2a2a' : '#fff',
-      padding: 15,
+      backgroundColor: darkMode ? '#2a2a2a' : '#ffffff',
+      padding: 14,
       marginBottom: 8,
       borderRadius: 12,
       borderWidth: 1,
-      borderColor: darkMode ? '#444' : '#e0e0e0',
+      borderColor: darkMode ? '#3a3a3a' : '#ebebeb',
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'space-between',
     },
     logItemEven: {
-      backgroundColor: darkMode ? '#333' : '#f8f9fa',
+      backgroundColor: darkMode ? '#252525' : '#f8f9fa',
     },
     logContent: {
       flex: 1,
-      marginRight: 10,
+      marginRight: 12,
     },
     logText: {
       fontSize: 14,
-      color: darkMode ? '#ffffff' : '#2c3e50',
+      color: darkMode ? '#e0e0e0' : '#2c3e50',
       lineHeight: 20,
     },
-    logTime: {
+    logMeta: {
       alignItems: 'flex-end',
     },
     timeText: {
       fontSize: 12,
-      color: darkMode ? '#999' : '#666',
-      fontStyle: 'italic',
+      fontWeight: '600',
+      color: darkMode ? '#3498db' : '#2980b9',
+    },
+    dateText: {
+      fontSize: 11,
+      color: darkMode ? '#666' : '#aaa',
+      marginTop: 2,
     },
     emptyState: {
       flex: 1,
       alignItems: 'center',
       justifyContent: 'center',
       padding: 40,
-      marginHorizontal: 20,
     },
     emptyIcon: {
       fontSize: 64,
       marginBottom: 20,
     },
     emptyTitle: {
-      fontSize: 24,
+      fontSize: 22,
       fontWeight: 'bold',
       color: darkMode ? '#ffffff' : '#2c3e50',
       marginBottom: 10,
       textAlign: 'center',
     },
     emptySubtitle: {
-      fontSize: 16,
-      color: darkMode ? '#999' : '#666',
+      fontSize: 15,
+      color: darkMode ? '#888' : '#888',
       textAlign: 'center',
-      lineHeight: 24,
+      lineHeight: 22,
     },
   });

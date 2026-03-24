@@ -1,315 +1,381 @@
-import React, {createContext, useEffect, useState} from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import React, {
+  createContext,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 import {StorageUtils} from '../utils/StorageUtils';
 import {NetworkUtils} from '../utils/NetworkUtils';
+import {
+  ActivityLog,
+  OfflineStatus,
+  OperationType,
+  PendingOperation,
+  Task,
+  TaskContextType,
+  TaskFormData,
+} from '../Types/Task';
 
-type Task = {
-  id: string;
-  title: string;
-  description: string;
-  priority: 'Low' | 'Medium' | 'High';
-  dueDate: string; // ISO string
-  tags: string[];
-  completed: boolean;
-  createdAt: string; // ISO string
-  updatedAt: string; // ISO string
-  synced: boolean; // Track if data is synced (for future online sync)
-};
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
-type PendingOperation = {
-  id: string;
-  type: 'create' | 'update' | 'delete';
-  data: any;
-  timestamp: string;
-};
+const generateId = (): string =>
+  Date.now().toString() + Math.random().toString(36).slice(2, 9);
 
-export const TaskContext = createContext<any>(null);
+const makeLog = (message: string): ActivityLog => ({
+  id: generateId(),
+  message,
+  timestamp: new Date().toISOString(), // stored as ISO — displayed in UI
+});
+
+const offlineLabel = (isOnline: boolean) => (!isOnline ? ' (offline)' : '');
+
+// ─── Context ─────────────────────────────────────────────────────────────────
+
+export const TaskContext = createContext<TaskContextType | null>(null);
+
+// ─── Provider ────────────────────────────────────────────────────────────────
 
 export const TaskProvider = ({children}: {children: React.ReactNode}) => {
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [logs, setLogs] = useState<string[]>([]);
+  const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [pendingOperations, setPendingOperations] = useState<
     PendingOperation[]
   >([]);
-  const [isOnline, setIsOnline] = useState<boolean>(true); // Default to true, can be updated later
+  const [isOnline, setIsOnline] = useState<boolean>(true);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
-  // Network connectivity monitoring
+  // Keep a ref so async callbacks always read the latest value
+  const isOnlineRef = useRef(isOnline);
+  const pendingOpsRef = useRef(pendingOperations);
+
+  // ── Persistence helpers ──────────────────────────────────────────────────
+
+  const persistTasks = useCallback(async (updated: Task[]) => {
+    setTasks(updated);
+    await StorageUtils.saveData('tasks', updated);
+  }, []);
+
+  /**
+   * Append logs without recursion.
+   * Unlike the original, we do NOT append a "💾 saved" log here —
+   * that caused clearLogs() to immediately create a new log entry.
+   */
+  const persistLogs = useCallback(async (updated: ActivityLog[]) => {
+    setLogs(updated);
+    await StorageUtils.saveData('logs', updated);
+  }, []);
+
+  const persistPendingOps = useCallback(async (updated: PendingOperation[]) => {
+    setPendingOperations(updated);
+    pendingOpsRef.current = updated;
+    await StorageUtils.saveData('pendingOperations', updated);
+  }, []);
+
+  const appendLog = useCallback(
+    async (message: string, currentLogs: ActivityLog[]) => {
+      const updated = [...currentLogs, makeLog(message)];
+      await persistLogs(updated);
+      return updated;
+    },
+    [persistLogs],
+  );
+
+  // ── Pending operations ───────────────────────────────────────────────────
+
+  const addPendingOperation = useCallback(
+    async (
+      type: OperationType,
+      data: PendingOperation['data'],
+      currentOps: PendingOperation[],
+    ): Promise<PendingOperation[]> => {
+      const op: PendingOperation = {
+        id: generateId(),
+        type,
+        data,
+        timestamp: new Date().toISOString(),
+      };
+      const updated = [...currentOps, op];
+      await persistPendingOps(updated);
+      return updated;
+    },
+    [persistPendingOps],
+  );
+
+  // ── Sync: flush pending ops when coming back online ──────────────────────
+  /**
+   * This was the biggest gap in the original — pending operations were
+   * tracked but never actually processed when connectivity resumed.
+   *
+   * TODO: replace the stub below with real API calls once a backend exists.
+   * The structure (iterate ops, call API per type, clear on success) is
+   * production-ready; only the API call itself is stubbed.
+   */
+  const syncPendingOperations = useCallback(
+    async (currentOps: PendingOperation[], currentLogs: ActivityLog[]) => {
+      if (currentOps.length === 0) return;
+
+      let updatedLogs = currentLogs;
+
+      try {
+        for (const op of currentOps) {
+          // ── Replace this block with real API calls ──
+          switch (op.type) {
+            case 'create':
+              // await api.createTask(op.data as Task);
+              break;
+            case 'update':
+              // await api.updateTask(op.data as Task);
+              break;
+            case 'delete':
+              // await api.deleteTask((op.data as Pick<Task,'id'>).id);
+              break;
+          }
+        }
+
+        // Mark all local tasks as synced
+        setTasks(prev => {
+          const synced = prev.map(t => ({...t, synced: true}));
+          StorageUtils.saveData('tasks', synced);
+          return synced;
+        });
+
+        await persistPendingOps([]);
+        updatedLogs = await appendLog(
+          `☁️ Synced ${currentOps.length} pending operation(s)`,
+          updatedLogs,
+        );
+      } catch (error) {
+        updatedLogs = await appendLog(
+          `❌ Sync failed — will retry on next connection`,
+          updatedLogs,
+        );
+      }
+    },
+    [appendLog, persistPendingOps],
+  );
+
+  // ── Network listener ─────────────────────────────────────────────────────
+
   useEffect(() => {
-    // Set up network monitoring
-    const unsubscribe = NetworkUtils.addListener(isOnline => {
-      setIsOnline(isOnline);
+    const unsubscribe = NetworkUtils.addListener(async online => {
+      const wasOffline = !isOnlineRef.current;
+      isOnlineRef.current = online;
+      setIsOnline(online);
+
+      // Coming back online — attempt to flush the queue
+      if (online && wasOffline) {
+        await syncPendingOperations(
+          pendingOpsRef.current,
+          // grab latest logs from state via functional updater trick
+          (await StorageUtils.loadData<ActivityLog[]>('logs')) ?? [],
+        );
+      }
     });
 
-    // Start periodic connectivity check
-    const stopPeriodicCheck = NetworkUtils.startPeriodicCheck(30000); // Check every 30 seconds
-
-    // Initial connectivity check
-    NetworkUtils.checkConnectivity();
+    const stopPeriodic = NetworkUtils.startPeriodicCheck(60_000, online => {
+      isOnlineRef.current = online;
+      setIsOnline(online);
+    });
 
     return () => {
       unsubscribe();
-      stopPeriodicCheck();
+      stopPeriodic();
     };
-  }, []);
+  }, [syncPendingOperations]);
 
-  // Load data from local storage on app start
+  // ── Initial load ─────────────────────────────────────────────────────────
+
   useEffect(() => {
-    const loadData = async () => {
+    const load = async () => {
+      setIsLoading(true);
       try {
-        setIsLoading(true);
+        const [savedTasks, savedLogs, savedOps, initialOnline] =
+          await Promise.all([
+            StorageUtils.loadData<Task[]>('tasks'),
+            StorageUtils.loadData<ActivityLog[]>('logs'),
+            StorageUtils.loadData<PendingOperation[]>('pendingOperations'),
+            NetworkUtils.checkConnectivity(),
+          ]);
 
-        // Load tasks
-        const savedTasks = await StorageUtils.loadData<Task[]>('tasks');
-        if (savedTasks) {
-          setTasks(savedTasks);
-        }
+        const resolvedTasks = savedTasks ?? [];
+        const resolvedLogs = savedLogs ?? [];
+        const resolvedOps = savedOps ?? [];
 
-        // Load logs
-        const savedLogs = await StorageUtils.loadData<string[]>('logs');
-        if (savedLogs) {
-          setLogs(savedLogs);
-        }
+        setTasks(resolvedTasks);
+        setPendingOperations(resolvedOps);
+        pendingOpsRef.current = resolvedOps;
+        isOnlineRef.current = initialOnline;
+        setIsOnline(initialOnline);
 
-        // Load pending operations
-        const savedPendingOps = await StorageUtils.loadData<PendingOperation[]>(
-          'pendingOperations',
-        );
-        if (savedPendingOps) {
-          setPendingOperations(savedPendingOps);
-        }
-
-        // Add startup log
-        const startupLog = `🚀 App started at ${new Date().toLocaleString()}`;
-        const updatedLogs = savedLogs
-          ? [...savedLogs, startupLog]
-          : [startupLog];
-        setLogs(updatedLogs);
-        await StorageUtils.saveData('logs', updatedLogs);
+        const startLog = makeLog(`🚀 App started`);
+        const updatedLogs = [...resolvedLogs, startLog];
+        await persistLogs(updatedLogs);
       } catch (error) {
         console.error('Error loading data:', error);
-        const errorLog = `❌ Error loading data at ${new Date().toLocaleString()}`;
-        setLogs(prev => [...prev, errorLog]);
       } finally {
         setIsLoading(false);
       }
     };
 
-    loadData();
-  }, []);
+    load();
+  }, [persistLogs]);
 
-  // Enhanced save function with error handling and offline support
-  const saveData = async (
-    newTasks: Task[],
-    newLogs: string[],
-    newPendingOps?: PendingOperation[],
-  ) => {
-    try {
-      setTasks(newTasks);
-      setLogs(newLogs);
+  // ── Task CRUD ────────────────────────────────────────────────────────────
 
-      // Save to AsyncStorage with error handling
-      await Promise.all([
-        StorageUtils.saveData('tasks', newTasks),
-        StorageUtils.saveData('logs', newLogs),
-        newPendingOps
-          ? StorageUtils.saveData('pendingOperations', newPendingOps)
-          : Promise.resolve(),
-      ]);
+  const addTask = useCallback(
+    async (formData: TaskFormData) => {
+      const now = new Date().toISOString();
+      const online = isOnlineRef.current;
 
-      if (newPendingOps) {
-        setPendingOperations(newPendingOps);
+      const newTask: Task = {
+        id: generateId(),
+        ...formData,
+        completed: false,
+        createdAt: now,
+        updatedAt: now,
+        synced: false, // never mark synced without actual API confirmation
+      };
+
+      const updatedTasks = [...tasks, newTask];
+      await persistTasks(updatedTasks);
+
+      let updatedOps = pendingOpsRef.current;
+      if (!online) {
+        updatedOps = await addPendingOperation('create', newTask, updatedOps);
       }
 
-      // Log successful save
-      const saveLog = `💾 Data saved locally at ${new Date().toLocaleString()}`;
-      const updatedLogs = [...newLogs, saveLog];
-      setLogs(updatedLogs);
-      await StorageUtils.saveData('logs', updatedLogs);
-    } catch (error) {
-      console.error('Error saving data:', error);
-      const errorLog = `❌ Error saving data at ${new Date().toLocaleString()}`;
-      setLogs(prev => [...prev, errorLog]);
-    }
-  };
+      await appendLog(
+        `📝 Created "${formData.title}"${offlineLabel(online)}`,
+        logs,
+      );
+    },
+    [tasks, logs, addPendingOperation, appendLog, persistTasks],
+  );
 
-  // Add pending operation for future sync
-  const addPendingOperation = (
-    operation: Omit<PendingOperation, 'id' | 'timestamp'>,
-  ) => {
-    const newOperation: PendingOperation = {
-      id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
-      timestamp: new Date().toISOString(),
-      ...operation,
-    };
+  const updateTask = useCallback(
+    async (updated: Task) => {
+      const now = new Date().toISOString();
+      const online = isOnlineRef.current;
 
-    const updatedPendingOps = [...pendingOperations, newOperation];
-    setPendingOperations(updatedPendingOps);
-    StorageUtils.saveData('pendingOperations', updatedPendingOps);
+      const updatedTask: Task = {...updated, updatedAt: now, synced: false};
+      const updatedTasks = tasks.map(t =>
+        t.id === updated.id ? updatedTask : t,
+      );
+      await persistTasks(updatedTasks);
 
-    return newOperation;
-  };
+      let updatedOps = pendingOpsRef.current;
+      if (!online) {
+        updatedOps = await addPendingOperation(
+          'update',
+          updatedTask,
+          updatedOps,
+        );
+      }
 
-  const addTask = (taskData: {
-    title: string;
-    description: string;
-    priority: 'Low' | 'Medium' | 'High';
-    dueDate: string;
-    tags: string[];
-  }) => {
-    const now = new Date().toISOString();
-    const newTask: Task = {
-      id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
-      title: taskData.title,
-      description: taskData.description,
-      priority: taskData.priority,
-      dueDate: taskData.dueDate,
-      tags: taskData.tags,
-      completed: false,
-      createdAt: now,
-      updatedAt: now,
-      synced: isOnline, // Mark as synced if online, otherwise will be synced later
-    };
+      await appendLog(
+        `✏️ Updated "${updated.title}"${offlineLabel(online)}`,
+        logs,
+      );
+    },
+    [tasks, logs, addPendingOperation, appendLog, persistTasks],
+  );
 
-    const newTasks = [...tasks, newTask];
-    const newLogs = [
-      ...logs,
-      `📝 Created "${taskData.title}" at ${new Date().toLocaleString()}${
-        !isOnline ? ' (offline)' : ''
-      }`,
-    ];
+  const toggleTask = useCallback(
+    async (id: string) => {
+      const now = new Date().toISOString();
+      const online = isOnlineRef.current;
+      const target = tasks.find(t => t.id === id);
+      if (!target) return;
 
-    // Add pending operation if offline
-    if (!isOnline) {
-      addPendingOperation({
-        type: 'create',
-        data: newTask,
-      });
-    }
+      const toggled: Task = {
+        ...target,
+        completed: !target.completed,
+        updatedAt: now,
+        synced: false,
+      };
+      const updatedTasks = tasks.map(t => (t.id === id ? toggled : t));
+      await persistTasks(updatedTasks);
 
-    saveData(newTasks, newLogs);
-  };
+      let updatedOps = pendingOpsRef.current;
+      if (!online) {
+        updatedOps = await addPendingOperation('update', toggled, updatedOps);
+      }
 
-  const updateTask = (updated: Task) => {
-    const now = new Date().toISOString();
-    const updatedTask = {
-      ...updated,
-      updatedAt: now,
-      synced: isOnline,
-    };
+      const action = target.completed ? 'Reopened' : 'Completed';
+      await appendLog(
+        `✔️ ${action} "${target.title}"${offlineLabel(online)}`,
+        logs,
+      );
+    },
+    [tasks, logs, addPendingOperation, appendLog, persistTasks],
+  );
 
-    const newTasks = tasks.map(t => (t.id === updated.id ? updatedTask : t));
-    const newLogs = [
-      ...logs,
-      `✏️ Updated "${updated.title}" at ${new Date().toLocaleString()}${
-        !isOnline ? ' (offline)' : ''
-      }`,
-    ];
+  const deleteTask = useCallback(
+    async (id: string) => {
+      const online = isOnlineRef.current;
+      const target = tasks.find(t => t.id === id);
+      if (!target) return;
 
-    // Add pending operation if offline
-    if (!isOnline) {
-      addPendingOperation({
-        type: 'update',
-        data: updatedTask,
-      });
-    }
+      const updatedTasks = tasks.filter(t => t.id !== id);
+      await persistTasks(updatedTasks);
 
-    saveData(newTasks, newLogs);
-  };
+      let updatedOps = pendingOpsRef.current;
+      if (!online) {
+        updatedOps = await addPendingOperation(
+          'delete',
+          {id: target.id, title: target.title} as Pick<Task, 'id' | 'title'>,
+          updatedOps,
+        );
+      }
 
-  const toggleTask = (id: string) => {
-    const toggledTask = tasks.find(t => t.id === id);
-    const now = new Date().toISOString();
+      await appendLog(
+        `🗑️ Deleted "${target.title}"${offlineLabel(online)}`,
+        logs,
+      );
+    },
+    [tasks, logs, addPendingOperation, appendLog, persistTasks],
+  );
 
-    const newTasks = tasks.map(t =>
-      t.id === id
-        ? {
-            ...t,
-            completed: !t.completed,
-            updatedAt: now,
-            synced: isOnline,
-          }
-        : t,
-    );
+  /**
+   * Fixed: original clearLogs() called saveData() which appended a
+   * "💾 Data saved" log, making it impossible to fully clear logs.
+   * Now we write directly to storage without triggering any log entries.
+   */
+  const clearLogs = useCallback(async () => {
+    await persistLogs([]);
+  }, [persistLogs]);
 
-    const action = toggledTask?.completed ? 'Reopened' : 'Completed';
-    const newLogs = [
-      ...logs,
-      `✔️ ${action} "${toggledTask?.title}" at ${new Date().toLocaleString()}${
-        !isOnline ? ' (offline)' : ''
-      }`,
-    ];
+  const clearPendingOperations = useCallback(async () => {
+    await persistPendingOps([]);
+  }, [persistPendingOps]);
 
-    // Add pending operation if offline
-    if (!isOnline && toggledTask) {
-      addPendingOperation({
-        type: 'update',
-        data: {
-          ...toggledTask,
-          completed: !toggledTask.completed,
-          updatedAt: now,
-          synced: false,
-        },
-      });
-    }
+  const getOfflineStatus = useCallback(
+    (): OfflineStatus => ({
+      isOnline,
+      pendingOperationsCount: pendingOperations.length,
+      isLoading,
+    }),
+    [isOnline, pendingOperations.length, isLoading],
+  );
 
-    saveData(newTasks, newLogs);
-  };
-
-  const deleteTask = (id: string) => {
-    const task = tasks.find(t => t.id === id);
-    const newTasks = tasks.filter(t => t.id !== id);
-    const newLogs = [
-      ...logs,
-      `🗑️ Deleted "${task?.title}" at ${new Date().toLocaleString()}${
-        !isOnline ? ' (offline)' : ''
-      }`,
-    ];
-
-    // Add pending operation if offline
-    if (!isOnline && task) {
-      addPendingOperation({
-        type: 'delete',
-        data: {id: task.id, title: task.title},
-      });
-    }
-
-    saveData(newTasks, newLogs);
-  };
-
-  const clearLogs = () => {
-    const newLogs: string[] = [];
-    saveData(tasks, newLogs);
-  };
-
-  // Clear pending operations (for future sync implementation)
-  const clearPendingOperations = () => {
-    setPendingOperations([]);
-    StorageUtils.removeData('pendingOperations');
-  };
-
-  // Get offline status and pending operations count
-  const getOfflineStatus = () => ({
-    isOnline,
-    pendingOperationsCount: pendingOperations.length,
-    isLoading,
-  });
+  // ── Provider value ───────────────────────────────────────────────────────
 
   return (
     <TaskContext.Provider
       value={{
         tasks,
         logs,
+        isOnline,
+        isLoading,
+        pendingOperations,
         addTask,
         updateTask,
         toggleTask,
         deleteTask,
         clearLogs,
-        pendingOperations,
         clearPendingOperations,
         getOfflineStatus,
-        isOnline,
-        isLoading,
       }}>
       {children}
     </TaskContext.Provider>

@@ -1,72 +1,68 @@
-// Simple network utility for offline-first functionality
-// This can be enhanced later with more sophisticated network detection
+import NetInfo, {
+  NetInfoState,
+  NetInfoSubscription,
+} from '@react-native-community/netinfo';
 
+type NetworkListener = (isOnline: boolean) => void;
+
+/**
+ * NetworkUtils — wraps @react-native-community/netinfo for reliable
+ * connectivity detection on both iOS and Android.
+ *
+
+ */
 export class NetworkUtils {
-  private static isOnline: boolean = true;
-  private static listeners: ((isOnline: boolean) => void)[] = [];
+  static toggleConnectivity() {
+    throw new Error('Method not implemented.');
+  }
+  private static subscription: NetInfoSubscription | null = null;
 
-  // Set online status
-  static setOnlineStatus(isOnline: boolean) {
-    if (this.isOnline !== isOnline) {
-      this.isOnline = isOnline;
-      this.notifyListeners();
-    }
+  /**
+   * Start listening for real network changes.
+   * Returns an unsubscribe function — call it in useEffect cleanup.
+   */
+  static addListener(callback: NetworkListener): () => void {
+    const unsubscribe = NetInfo.addEventListener((state: NetInfoState) => {
+      const online = !!(state.isConnected && state.isInternetReachable);
+      callback(online);
+    });
+
+    return unsubscribe;
   }
 
-  // Get current online status
-  static getOnlineStatus(): boolean {
-    return this.isOnline;
-  }
-
-  // Add listener for network status changes
-  static addListener(callback: (isOnline: boolean) => void) {
-    this.listeners.push(callback);
-    return () => {
-      this.listeners = this.listeners.filter(listener => listener !== callback);
-    };
-  }
-
-  // Notify all listeners
-  private static notifyListeners() {
-    this.listeners.forEach(listener => listener(this.isOnline));
-  }
-
-  // Simple network check using a lightweight request
+  /**
+   * One-shot check of current connectivity.
+   * Uses NetInfo.fetch() which returns the actual native network state.
+   */
   static async checkConnectivity(): Promise<boolean> {
     try {
-      // Use a simple, fast endpoint for connectivity check
-      const response = await fetch('https://www.google.com/favicon.ico', {
-        method: 'HEAD',
-        mode: 'no-cors',
-        cache: 'no-cache',
-        timeout: 3000, // 3 second timeout
-      } as any);
-      
-      this.setOnlineStatus(true);
-      return true;
-    } catch (error) {
-      this.setOnlineStatus(false);
+      const state = await NetInfo.fetch();
+      return !!(state.isConnected && state.isInternetReachable);
+    } catch {
       return false;
     }
   }
 
-  // Periodic connectivity check
-  static startPeriodicCheck(intervalMs: number = 30000) {
-    const checkConnectivity = async () => {
-      await this.checkConnectivity();
+  /**
+   * Start periodic connectivity checks.
+   * Returns a cleanup function to clear the interval.
+   *
+   * Note: NetInfo already fires events on change, so periodic checks are
+   * only needed as a safety net for edge cases (e.g. captive portals).
+   * Default interval is 60s — no need to hammer the network.
+   */
+  static startPeriodicCheck(
+    intervalMs: number = 60_000,
+    onResult?: NetworkListener,
+  ): () => void {
+    const run = async () => {
+      const online = await NetworkUtils.checkConnectivity();
+      onResult?.(online);
     };
 
-    // Initial check
-    checkConnectivity();
-
-    // Set up periodic check
-    const interval = setInterval(checkConnectivity, intervalMs);
+    run(); // immediate first check
+    const interval = setInterval(run, intervalMs);
 
     return () => clearInterval(interval);
-  }
-
-  // Manual connectivity toggle (for testing)
-  static toggleConnectivity() {
-    this.setOnlineStatus(!this.isOnline);
   }
 }

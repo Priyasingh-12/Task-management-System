@@ -1,4 +1,4 @@
-import React, {useContext, useState} from 'react';
+import React, {useContext, useMemo, useState} from 'react';
 import {
   View,
   Text,
@@ -12,157 +12,198 @@ import {
 } from 'react-native';
 import {Picker} from '@react-native-picker/picker';
 import {useSafeAreaInsets} from 'react-native-safe-area-context';
+import {StackNavigationProp} from '@react-navigation/stack';
 import {TaskContext} from '../context/TaskContext';
 import {ThemeContext} from '../context/ThemeContext';
-import {StackNavigationProp} from '@react-navigation/stack';
+
+import {Task} from '../Types/Task';
 import TaskItem from '../Component/TaskItem';
 import OfflineIndicator from '../Component/OfflineIndicator';
 
-type TaskListScreenProps = {
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+type Props = {
   navigation: StackNavigationProp<any, any>;
 };
 
-export default function TaskListScreen({navigation}: TaskListScreenProps) {
-  const {tasks, toggleTask, deleteTask} = useContext(TaskContext);
+type GroupKey = 'Overdue' | 'Today' | 'Upcoming';
+
+// ─── Component ────────────────────────────────────────────────────────────────
+
+export default function TaskListScreen({navigation}: Props) {
+  const context = useContext(TaskContext);
   const {darkMode} = useContext(ThemeContext);
   const insets = useSafeAreaInsets();
+
   const [query, setQuery] = useState('');
-  const [priorityFilter, setPriorityFilter] = useState('All');
-  const [statusFilter, setStatusFilter] = useState('All');
+  const [priorityFilter, setPriorityFilter] = useState<string>('All');
+  const [statusFilter, setStatusFilter] = useState<string>('All');
   const [refreshing, setRefreshing] = useState(false);
 
-  // Group tasks
-  const today = new Date();
-  const todayString = today.toDateString();
-  const grouped = {
-    Today: tasks.filter(
-      (t: {dueDate: string | number | Date; completed: boolean}) =>
-        !t.completed && new Date(t.dueDate).toDateString() === todayString,
-    ),
-    Upcoming: tasks.filter(
-      (t: {dueDate: string | number | Date; completed: boolean}) =>
-        !t.completed && new Date(t.dueDate) > today,
-    ),
-    Overdue: tasks.filter(
-      (t: {completed: boolean; dueDate: string | number | Date}) =>
-        !t.completed && new Date(t.dueDate) < today,
-    ),
-  };
+  if (!context) return null;
+  const {tasks, toggleTask, deleteTask} = context;
 
-  // Search + filter
-  const filterTasks = (list: any[]) =>
-    list.filter(
-      t =>
-        (t.title.toLowerCase().includes(query.toLowerCase()) ||
-          t.description.toLowerCase().includes(query.toLowerCase())) &&
-        (priorityFilter === 'All' || t.priority === priorityFilter) &&
-        (statusFilter === 'All' ||
-          (statusFilter === 'Completed' && t.completed) ||
-          (statusFilter === 'Pending' && !t.completed)),
-    );
+  // Compute styles once per render (outside renderGroup)
+  const styles = getStyles(darkMode, insets);
+
+  // ── Date helpers (memoised) ────────────────────────────────────────────
+
+  /**
+   * Fixed grouping logic:
+   * - "Today"    → dueDate is exactly today, task is incomplete
+   * - "Upcoming" → dueDate is strictly AFTER today (not >= today)
+   *                 so today's tasks don't appear in both groups
+   * - "Overdue"  → dueDate is before start of today, task is incomplete
+   */
+  const {grouped, completedTasks} = useMemo(() => {
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    const endOfToday = new Date();
+    endOfToday.setHours(23, 59, 59, 999);
+
+    const incomplete = tasks.filter(t => !t.completed);
+    const completed = tasks.filter(t => t.completed);
+
+    return {
+      grouped: {
+        Overdue: incomplete.filter(t => new Date(t.dueDate) < startOfToday),
+        Today: incomplete.filter(t => {
+          const d = new Date(t.dueDate);
+          return d >= startOfToday && d <= endOfToday;
+        }),
+        Upcoming: incomplete.filter(t => new Date(t.dueDate) > endOfToday),
+      },
+      completedTasks: completed,
+    };
+  }, [tasks]);
+
+  // ── Filter ─────────────────────────────────────────────────────────────
+
+  const applyFilters = (list: Task[]): Task[] =>
+    list.filter(t => {
+      const matchesSearch =
+        t.title.toLowerCase().includes(query.toLowerCase()) ||
+        t.description.toLowerCase().includes(query.toLowerCase()) ||
+        t.tags.some(tag => tag.toLowerCase().includes(query.toLowerCase()));
+
+      const matchesPriority =
+        priorityFilter === 'All' || t.priority === priorityFilter;
+
+      const matchesStatus =
+        statusFilter === 'All' ||
+        (statusFilter === 'Completed' && t.completed) ||
+        (statusFilter === 'Pending' && !t.completed);
+
+      return matchesSearch && matchesPriority && matchesStatus;
+    });
+
+  // ── Handlers ───────────────────────────────────────────────────────────
 
   const onRefresh = async () => {
     setRefreshing(true);
-    // Simulate refresh delay
-    setTimeout(() => {
-      setRefreshing(false);
-    }, 1000);
+    setTimeout(() => setRefreshing(false), 800);
   };
 
-  const renderEmptyState = (title: string, count: number) => {
-    if (count === 0) {
-      return (
-        <View style={styles.emptyState}>
-          <Text style={styles.emptyIcon}>📝</Text>
-          <Text style={styles.emptyTitle}>No {title.toLowerCase()} tasks</Text>
-          <Text style={styles.emptySubtitle}>
-            {title === 'Today'
-              ? 'No tasks due today. Great job!'
-              : title === 'Upcoming'
-              ? 'No upcoming tasks scheduled.'
-              : "No overdue tasks. You're all caught up!"}
-          </Text>
-        </View>
-      );
-    }
-    return null;
+  const confirmDelete = (task: Task) => {
+    Alert.alert(
+      'Delete Task',
+      `Are you sure you want to delete "${task.title}"? This cannot be undone.`,
+      [
+        {text: 'Cancel', style: 'cancel'},
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => deleteTask(task.id),
+        },
+      ],
+    );
   };
 
-  const renderGroup = (title: string, list: any[]) => {
-    const filteredList = filterTasks(list);
-    const styles = getStyles(darkMode, insets);
+  // ── Renderers ──────────────────────────────────────────────────────────
+
+  const renderTaskItem = (item: Task) => (
+    <TaskItem
+      key={item.id}
+      task={item}
+      onPress={() => navigation.navigate('TaskForm', {task: item})}
+      onToggle={() => toggleTask(item.id)}
+      onDelete={() => confirmDelete(item)}
+    />
+  );
+
+  const renderGroup = (title: GroupKey, list: Task[]) => {
+    const filtered = applyFilters(list);
+    if (filtered.length === 0) return null; // Don't render empty groups
+
+    const GROUP_META: Record<GroupKey, {icon: string; color: string}> = {
+      Overdue: {icon: '🔴', color: '#e74c3c'},
+      Today: {icon: '📅', color: '#3498db'},
+      Upcoming: {icon: '🗓️', color: '#27ae60'},
+    };
+    const meta = GROUP_META[title];
 
     return (
       <View key={title} style={styles.groupContainer}>
         <View style={styles.groupHeader}>
-          <Text style={styles.groupTitle}>{title}</Text>
-          <View style={styles.countBadge}>
-            <Text style={styles.countText}>{filteredList.length}</Text>
+          <Text style={styles.groupIcon}>{meta.icon}</Text>
+          <Text style={[styles.groupTitle, {color: meta.color}]}>{title}</Text>
+          <View style={[styles.countBadge, {backgroundColor: meta.color}]}>
+            <Text style={styles.countText}>{filtered.length}</Text>
           </View>
         </View>
-
-        {renderEmptyState(title, filteredList.length)}
-
-        {filteredList.length > 0 && (
-          <FlatList
-            data={filteredList}
-            keyExtractor={item => item.id}
-            renderItem={({item}) => (
-              <TaskItem
-                task={item}
-                onPress={() => navigation.navigate('TaskForm', {task: item})}
-                onToggle={() => toggleTask(item.id)}
-                onDelete={() =>
-                  Alert.alert(
-                    'Confirm Delete',
-                    `Are you sure you want to delete "${item.title}"? This action cannot be undone.`,
-                    [
-                      {text: 'Cancel', style: 'cancel'},
-                      {
-                        text: 'Delete',
-                        onPress: () => deleteTask(item.id),
-                        style: 'destructive',
-                      },
-                    ],
-                  )
-                }
-              />
-            )}
-            showsVerticalScrollIndicator={false}
-          />
-        )}
+        {filtered.map(renderTaskItem)}
       </View>
     );
   };
 
-  const renderMainEmptyState = () => {
-    if (tasks.length === 0) {
-      const styles = getStyles(darkMode, insets);
-      return (
-        <View style={styles.mainEmptyState}>
-          <Text style={styles.mainEmptyIcon}>📋</Text>
-          <Text style={styles.mainEmptyTitle}>No tasks yet</Text>
-          <Text style={styles.mainEmptySubtitle}>
-            Create your first task to get started with organizing your work!
-          </Text>
-          <TouchableOpacity
-            style={styles.createFirstTaskButton}
-            onPress={() => navigation.navigate('TaskForm', {task: null})}>
-            <Text style={styles.createFirstTaskText}>
-              Create Your First Task
-            </Text>
-          </TouchableOpacity>
+  const renderCompleted = () => {
+    const filtered = applyFilters(completedTasks);
+    if (filtered.length === 0) return null;
+
+    return (
+      <View style={styles.groupContainer}>
+        <View style={styles.groupHeader}>
+          <Text style={styles.groupIcon}>✅</Text>
+          <Text style={[styles.groupTitle, {color: '#7f8c8d'}]}>Completed</Text>
+          <View style={[styles.countBadge, {backgroundColor: '#7f8c8d'}]}>
+            <Text style={styles.countText}>{filtered.length}</Text>
+          </View>
         </View>
-      );
-    }
-    return null;
+        {filtered.map(renderTaskItem)}
+      </View>
+    );
   };
 
-  const styles = getStyles(darkMode, insets);
+  const renderEmptyState = () => (
+    <View style={styles.mainEmptyState}>
+      <Text style={styles.mainEmptyIcon}>📋</Text>
+      <Text style={styles.mainEmptyTitle}>No tasks yet</Text>
+      <Text style={styles.mainEmptySubtitle}>
+        Create your first task to get started!
+      </Text>
+      <TouchableOpacity
+        style={styles.createFirstTaskButton}
+        onPress={() => navigation.navigate('TaskForm', {task: null})}>
+        <Text style={styles.createFirstTaskText}>Create Your First Task</Text>
+      </TouchableOpacity>
+    </View>
+  );
+
+  const hasAnyVisible =
+    applyFilters([
+      ...grouped.Overdue,
+      ...grouped.Today,
+      ...grouped.Upcoming,
+      ...completedTasks,
+    ]).length > 0;
+
+  // ─── Render ──────────────────────────────────────────────────────────────
 
   return (
     <View style={styles.container}>
       <OfflineIndicator />
+
       <ScrollView
         style={styles.scrollView}
         contentContainerStyle={styles.scrollContent}
@@ -174,6 +215,7 @@ export default function TaskListScreen({navigation}: TaskListScreenProps) {
           />
         }
         showsVerticalScrollIndicator={false}>
+        {/* Header */}
         <View style={styles.header}>
           <Text style={styles.screenTitle}>My Tasks</Text>
           <Text style={styles.taskCount}>
@@ -181,16 +223,24 @@ export default function TaskListScreen({navigation}: TaskListScreenProps) {
           </Text>
         </View>
 
+        {/* Search */}
         <View style={styles.searchContainer}>
+          <Text style={styles.searchIcon}>🔍</Text>
           <TextInput
             style={styles.search}
-            placeholder="Search tasks..."
-            placeholderTextColor={darkMode ? '#999' : '#666'}
+            placeholder="Search tasks, tags..."
+            placeholderTextColor={darkMode ? '#666' : '#aaa'}
             value={query}
             onChangeText={setQuery}
           />
+          {query.length > 0 && (
+            <TouchableOpacity onPress={() => setQuery('')}>
+              <Text style={styles.clearSearch}>✕</Text>
+            </TouchableOpacity>
+          )}
         </View>
 
+        {/* Filters */}
         <View style={styles.filtersContainer}>
           <View style={styles.filterGroup}>
             <Text style={styles.filterLabel}>Priority</Text>
@@ -199,7 +249,7 @@ export default function TaskListScreen({navigation}: TaskListScreenProps) {
                 selectedValue={priorityFilter}
                 style={styles.picker}
                 onValueChange={setPriorityFilter}>
-                <Picker.Item label="All Priorities" value="All" />
+                <Picker.Item label="All" value="All" />
                 <Picker.Item label="Low" value="Low" />
                 <Picker.Item label="Medium" value="Medium" />
                 <Picker.Item label="High" value="High" />
@@ -214,7 +264,7 @@ export default function TaskListScreen({navigation}: TaskListScreenProps) {
                 selectedValue={statusFilter}
                 style={styles.picker}
                 onValueChange={setStatusFilter}>
-                <Picker.Item label="All Status" value="All" />
+                <Picker.Item label="All" value="All" />
                 <Picker.Item label="Pending" value="Pending" />
                 <Picker.Item label="Completed" value="Completed" />
               </Picker>
@@ -222,199 +272,212 @@ export default function TaskListScreen({navigation}: TaskListScreenProps) {
           </View>
         </View>
 
-        {renderMainEmptyState()}
-
-        {tasks.length > 0 && (
+        {/* Task groups */}
+        {tasks.length === 0 ? (
+          renderEmptyState()
+        ) : !hasAnyVisible ? (
+          <View style={styles.noResultsState}>
+            <Text style={styles.noResultsText}>
+              No tasks match your filters.
+            </Text>
+          </View>
+        ) : (
           <>
+            {renderGroup('Overdue', grouped.Overdue)}
             {renderGroup('Today', grouped.Today)}
             {renderGroup('Upcoming', grouped.Upcoming)}
-            {renderGroup('Overdue', grouped.Overdue)}
+            {renderCompleted()}
           </>
         )}
       </ScrollView>
 
+      {/* FAB */}
       <TouchableOpacity
         style={styles.fab}
-        onPress={() => navigation.navigate('TaskForm', {task: null})}>
+        onPress={() => navigation.navigate('TaskForm', {task: null})}
+        accessibilityLabel="Add new task"
+        accessibilityRole="button">
         <Text style={styles.fabText}>+</Text>
       </TouchableOpacity>
     </View>
   );
 }
 
-const getStyles = (darkMode: boolean, insets: any) =>
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
+const getStyles = (
+  darkMode: boolean,
+  insets: ReturnType<typeof useSafeAreaInsets>,
+) =>
   StyleSheet.create({
     container: {
       flex: 1,
-      backgroundColor: darkMode ? '#1a1a1a' : '#f8f9fa',
+      backgroundColor: darkMode ? '#1a1a1a' : '#f4f6f8',
     },
-    scrollView: {
-      flex: 1,
-    },
+    scrollView: {flex: 1},
     scrollContent: {
-      paddingBottom: insets?.bottom + 20,
+      paddingBottom: insets.bottom + 90, // room for FAB
       paddingTop: insets.top,
     },
     header: {
-      padding: 20,
-      paddingBottom: 10,
+      paddingHorizontal: 20,
+      paddingTop: 16,
+      paddingBottom: 8,
     },
     screenTitle: {
-      fontSize: 28,
-      fontWeight: 'bold',
-      color: darkMode ? '#ffffff' : '#2c3e50',
-      marginBottom: 5,
+      fontSize: 30,
+      fontWeight: '800',
+      color: darkMode ? '#ffffff' : '#1a1a2e',
+      letterSpacing: -0.5,
     },
     taskCount: {
-      fontSize: 16,
-      color: darkMode ? '#999' : '#666',
+      fontSize: 14,
+      color: darkMode ? '#888' : '#888',
+      marginTop: 2,
     },
     searchContainer: {
-      paddingHorizontal: 20,
-      marginBottom: 15,
+      flexDirection: 'row',
+      alignItems: 'center',
+      marginHorizontal: 20,
+      marginBottom: 14,
+      backgroundColor: darkMode ? '#2a2a2a' : '#ffffff',
+      borderWidth: 1,
+      borderColor: darkMode ? '#3a3a3a' : '#e0e0e0',
+      borderRadius: 12,
+      paddingHorizontal: 14,
+    },
+    searchIcon: {
+      fontSize: 14,
+      marginRight: 8,
     },
     search: {
-      borderWidth: 1,
-      borderColor: darkMode ? '#444' : '#ddd',
-      borderRadius: 12,
-      padding: 15,
-      fontSize: 16,
-      backgroundColor: darkMode ? '#2a2a2a' : '#fff',
-      color: darkMode ? '#ffffff' : '#000000',
+      flex: 1,
+      paddingVertical: 13,
+      fontSize: 15,
+      color: darkMode ? '#ffffff' : '#1a1a2e',
+    },
+    clearSearch: {
+      fontSize: 14,
+      color: darkMode ? '#666' : '#aaa',
+      paddingLeft: 8,
     },
     filtersContainer: {
       flexDirection: 'row',
       paddingHorizontal: 20,
       marginBottom: 20,
-      gap: 15,
+      gap: 12,
     },
-    filterGroup: {
-      flex: 1,
-    },
+    filterGroup: {flex: 1},
     filterLabel: {
-      fontSize: 14,
-      fontWeight: '600',
-      color: darkMode ? '#e0e0e0' : '#34495e',
-      marginBottom: 8,
+      fontSize: 12,
+      fontWeight: '700',
+      color: darkMode ? '#888' : '#888',
+      textTransform: 'uppercase',
+      letterSpacing: 0.5,
+      marginBottom: 6,
     },
     pickerContainer: {
       borderWidth: 1,
-      borderColor: darkMode ? '#444' : '#ddd',
-      borderRadius: 12,
-      backgroundColor: darkMode ? '#2a2a2a' : '#fff',
+      borderColor: darkMode ? '#3a3a3a' : '#e0e0e0',
+      borderRadius: 10,
+      backgroundColor: darkMode ? '#2a2a2a' : '#ffffff',
+      overflow: 'hidden',
     },
     picker: {
-      height: 50,
-      color: darkMode ? '#ffffff' : '#000000',
+  
+      color: darkMode ? '#ffffff' : '#1a1a2e',
     },
     groupContainer: {
-      marginBottom: 25,
+      marginBottom: 24,
       paddingHorizontal: 20,
     },
     groupHeader: {
       flexDirection: 'row',
       alignItems: 'center',
-      justifyContent: 'space-between',
-      marginBottom: 15,
+      marginBottom: 12,
+    },
+    groupIcon: {
+      fontSize: 16,
+      marginRight: 8,
     },
     groupTitle: {
-      fontSize: 20,
-      fontWeight: 'bold',
-      color: darkMode ? '#ffffff' : '#2c3e50',
+      fontSize: 18,
+      fontWeight: '700',
+      flex: 1,
     },
     countBadge: {
-      backgroundColor: darkMode ? '#3498db' : '#007BFF',
       borderRadius: 12,
-      paddingHorizontal: 12,
-      paddingVertical: 4,
+      paddingHorizontal: 10,
+      paddingVertical: 3,
     },
     countText: {
       color: '#fff',
       fontSize: 12,
-      fontWeight: 'bold',
-    },
-    emptyState: {
-      alignItems: 'center',
-      padding: 30,
-      backgroundColor: darkMode ? '#2a2a2a' : '#fff',
-      borderRadius: 12,
-      marginBottom: 10,
-    },
-    emptyIcon: {
-      fontSize: 48,
-      marginBottom: 15,
-    },
-    emptyTitle: {
-      fontSize: 18,
-      fontWeight: '600',
-      color: darkMode ? '#e0e0e0' : '#34495e',
-      marginBottom: 8,
-    },
-    emptySubtitle: {
-      fontSize: 14,
-      color: darkMode ? '#999' : '#666',
-      textAlign: 'center',
-      lineHeight: 20,
+      fontWeight: '700',
     },
     mainEmptyState: {
-      borderWidth: 0.2,
       alignItems: 'center',
       padding: 40,
       marginHorizontal: 20,
-      backgroundColor: darkMode ? '#2a2a2a' : '#fff',
-      borderRadius: 16,
       marginTop: 20,
+      backgroundColor: darkMode ? '#2a2a2a' : '#ffffff',
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: darkMode ? '#3a3a3a' : '#e0e0e0',
     },
-    mainEmptyIcon: {
-      fontSize: 64,
-      marginBottom: 20,
-    },
+    mainEmptyIcon: {fontSize: 60, marginBottom: 16},
     mainEmptyTitle: {
-      fontSize: 24,
-      fontWeight: 'bold',
-      color: darkMode ? '#ffffff' : '#2c3e50',
-      marginBottom: 10,
+      fontSize: 22,
+      fontWeight: '700',
+      color: darkMode ? '#fff' : '#1a1a2e',
+      marginBottom: 8,
     },
     mainEmptySubtitle: {
-      fontSize: 16,
-      color: darkMode ? '#999' : '#666',
+      fontSize: 15,
+      color: darkMode ? '#888' : '#888',
       textAlign: 'center',
-      lineHeight: 24,
-      marginBottom: 30,
+      lineHeight: 22,
+      marginBottom: 28,
     },
     createFirstTaskButton: {
       backgroundColor: '#3498db',
-      paddingHorizontal: 30,
-      paddingVertical: 15,
+      paddingHorizontal: 28,
+      paddingVertical: 14,
       borderRadius: 12,
     },
     createFirstTaskText: {
       color: '#fff',
-      fontSize: 16,
-      fontWeight: 'bold',
+      fontSize: 15,
+      fontWeight: '700',
+    },
+    noResultsState: {
+      alignItems: 'center',
+      padding: 32,
+    },
+    noResultsText: {
+      fontSize: 15,
+      color: darkMode ? '#888' : '#aaa',
     },
     fab: {
       position: 'absolute',
-      bottom: 30,
-      right: 30,
+      bottom: insets.bottom + 24,
+      right: 24,
       backgroundColor: '#3498db',
       borderRadius: 30,
       width: 60,
       height: 60,
       justifyContent: 'center',
       alignItems: 'center',
-      shadowColor: '#000',
-      shadowOffset: {
-        width: 0,
-        height: 4,
-      },
-      shadowOpacity: 0.3,
-      shadowRadius: 8,
-      elevation: 0,
+      shadowColor: '#3498db',
+      shadowOffset: {width: 0, height: 4},
+      shadowOpacity: 0.4,
+      shadowRadius: 10,
+      elevation: 8,
     },
     fabText: {
-      fontSize: 28,
+      fontSize: 30,
       color: '#fff',
-      fontWeight: 'bold',
+      fontWeight: '300',
+      lineHeight: 34,
     },
   });
