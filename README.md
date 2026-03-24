@@ -92,9 +92,34 @@ Tracks user actions:
 git clone https://github.com/Priyasingh-12/Task-management-System.git
 cd Task-management-System
 npm install
+---
 
+### ▶️ Run the App (Android)
 
+npm run android
 
+---
+
+### 🔧 If build fails (important)
+cd android
+gradlew clean
+cd ..
+npx react-native run-android
+
+---
+
+### 📱 Run on Emulator
+Open Android Studio
+Start an emulator
+Then run the app
+
+---
+
+### 📱 Run on Real Device
+Enable USB Debugging
+Connect phone via USB
+Run:
+---
 
 👩‍💻 Author
 
