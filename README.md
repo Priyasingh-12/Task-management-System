@@ -1,8 +1,6 @@
-📱 Task Management App
 
 # 📱 Task Management App
 
-> Offline-first Task Manager built with React Native
 
 ## 📂 Project Structure
 src/
