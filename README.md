@@ -121,6 +121,8 @@ Connect phone via USB
 Run:
 ---
 
+![Image Alt](https://github.com/Priyasingh-12/Task-management-System/blob/0918143f2376324a25196f71394fbb128de88d88/pic1.png)
+
 👩‍💻 Author
 
 Priya Singh
